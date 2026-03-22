@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blade Bridge - Privacy Policy</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
+    h1 { font-size: 1.8em; }
+    h2 { font-size: 1.3em; margin-top: 2em; }
+  </style>
+</head>
+<body>
+  <h1>Blade Bridge - Privacy Policy</h1>
+  <p><strong>Last updated:</strong> March 22, 2026</p>
+
+  <h2>Summary</h2>
+  <p>Blade Bridge does not collect, store, transmit, or share any user data. It is a local-only communication bridge between your terminal and your browser.</p>
+
+  <h2>Data Collection</h2>
+  <p>Blade Bridge collects <strong>no data whatsoever</strong>. Specifically:</p>
+  <ul>
+    <li>No personal information is collected</li>
+    <li>No browsing history is collected</li>
+    <li>No analytics or telemetry are sent</li>
+    <li>No cookies are used</li>
+    <li>No network requests are made to external servers</li>
+  </ul>
+
+  <h2>How It Works</h2>
+  <p>Blade Bridge communicates exclusively between your local CLI and the Chrome extension using Chrome's Native Messaging protocol. All communication happens locally on your machine via stdin/stdout pipes and a local IPC socket. No data leaves your computer.</p>
+
+  <h2>Permissions</h2>
+  <ul>
+    <li><strong>nativeMessaging</strong> - Required to communicate with the local CLI via Chrome's Native Messaging protocol.</li>
+    <li><strong>tabs</strong> - Required to list, open, close, and navigate browser tabs when commanded by the CLI.</li>
+    <li><strong>scripting</strong> - Required to execute scripts on pages when commanded by the CLI.</li>
+    <li><strong>activeTab</strong> - Required to interact with the currently active tab.</li>
+    <li><strong>debugger</strong> - Required to execute JavaScript on pages that have strict Content Security Policies.</li>
+    <li><strong>host_permissions (&lt;all_urls&gt;)</strong> - Required so the CLI can interact with any tab regardless of the URL.</li>
+  </ul>
+
+  <h2>Third Parties</h2>
+  <p>No data is shared with any third party. Blade Bridge has zero external dependencies and makes zero network requests.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the update will be posted here with a new date.</p>
+
+  <h2>Contact</h2>
+  <p>For questions, open an issue at <a href="https://github.com/LLRHook/claude-extension-communication/issues">github.com/LLRHook/claude-extension-communication</a>.</p>
+</body>
+</html>
