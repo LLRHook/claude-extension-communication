@@ -1,6 +1,15 @@
 const HOST_NAME = 'com.blade.bridge'
 let port = null
 let backoff = 1000
+const attachedTabs = new Set()
+
+// Clean up debugger when tabs close or debugger detaches
+chrome.debugger.onDetach.addListener((source) => {
+  attachedTabs.delete(source.tabId)
+})
+chrome.tabs.onRemoved.addListener((tabId) => {
+  attachedTabs.delete(tabId)
+})
 
 const handlers = {
   'ping': () => ({ pong: true, timestamp: Date.now() }),
@@ -10,16 +19,30 @@ const handlers = {
 
   'tabs.navigate': (params) => chrome.tabs.update(params.tabId, { url: params.url }),
 
-  'tabs.executeScript': (params) => {
-    return chrome.scripting.executeScript({
-      target: { tabId: params.tabId },
-      world: params.world || 'MAIN',
-      func: async (code) => {
-        const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor
-        return await new AsyncFunction(code)()
-      },
-      args: [params.code]
-    }).then(results => results[0]?.result)
+  'tabs.executeScript': async (params) => {
+    const tabId = params.tabId
+    if (!attachedTabs.has(tabId)) {
+      await chrome.debugger.attach({ tabId }, '1.3')
+      attachedTabs.add(tabId)
+    }
+    const res = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+      expression: `(async () => { ${params.code} })()`,
+      returnByValue: true,
+      awaitPromise: true
+    })
+    if (res.exceptionDetails) {
+      throw new Error(res.exceptionDetails.text || 'Script execution error')
+    }
+    return res.result?.value
+  },
+
+  'tabs.detachDebugger': async (params) => {
+    const tabId = params.tabId
+    if (attachedTabs.has(tabId)) {
+      await chrome.debugger.detach({ tabId }).catch(() => {})
+      attachedTabs.delete(tabId)
+    }
+    return { ok: true }
   },
 
   'tabs.waitForLoad': (params) => new Promise((resolve, reject) => {

@@ -101,7 +101,8 @@ blade> quit
 | `tabs.open`         | `{ url }` and any `chrome.tabs.create` opts | Tab object                         |
 | `tabs.close`        | `{ tabId }`                                 | `{ ok: true }`                     |
 | `tabs.navigate`     | `{ tabId, url }`                            | Tab object                         |
-| `tabs.executeScript`| `{ tabId, code, world? }`                   | script return value                |
+| `tabs.executeScript`| `{ tabId, code }`                           | script return value (via chrome.debugger) |
+| `tabs.detachDebugger`| `{ tabId }`                                | `{ ok: true }`                     |
 | `tabs.waitForLoad`  | `{ tabId, timeout? }`                       | `{ ok: true }`                     |
 | `tabs.screenshot`   | `{ windowId?, format? }`                    | base64 data URI                    |
 | `extension.getPopupUrl` | `{ extensionId, popup? }`               | `{ url }`                          |

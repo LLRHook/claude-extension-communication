@@ -3,7 +3,7 @@
   "name": "Blade Bridge",
   "version": "1.0.0",
   "description": "Zero-dependency CLI-to-Chrome-extension bridge via Native Messaging",
-  "permissions": ["nativeMessaging", "tabs", "scripting", "activeTab"],
+  "permissions": ["nativeMessaging", "tabs", "scripting", "activeTab", "debugger"],
   "host_permissions": ["<all_urls>"],
   "icons": {
     "16": "icons/icon16.png",
