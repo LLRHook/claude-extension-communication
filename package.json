@@ -1,0 +1,41 @@
+{
+  "name": "blade-bridge",
+  "version": "1.0.0",
+  "description": "Zero-dependency CLI-to-Chrome-extension bridge via Native Messaging",
+  "main": "blade.js",
+  "bin": {
+    "blade-bridge": "./blade.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "postinstall": "echo 'Run: blade-bridge install <extension-id> to complete setup'"
+  },
+  "keywords": [
+    "chrome",
+    "extension",
+    "native-messaging",
+    "cli",
+    "bridge",
+    "ipc",
+    "chrome-extension",
+    "devtools"
+  ],
+  "author": "Victor Ivanov",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anthropics/blade-bridge.git"
+  },
+  "homepage": "https://github.com/anthropics/blade-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/anthropics/blade-bridge/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "blade.js",
+    "src/",
+    "extension/"
+  ]
+}

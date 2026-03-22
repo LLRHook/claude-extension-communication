@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Blade Bridge",
+  "version": "1.0.0",
+  "description": "Zero-dependency CLI-to-Chrome-extension bridge via Native Messaging",
+  "permissions": ["nativeMessaging", "tabs", "scripting", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
