@@ -17,7 +17,14 @@ function startCli(args) {
 
   conn.on('error', err => {
     if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
-      console.error('Host not running. Is the Chrome extension active?')
+      console.error('Host not running.')
+      console.error('')
+      console.error('  Possible causes:')
+      console.error('  - Chrome extension is not loaded or not active')
+      console.error('  - Native messaging host is not installed')
+      console.error('')
+      console.error('  Run "blade-bridge doctor" to diagnose')
+      console.error('  Run "blade-bridge setup" for guided installation')
     } else {
       console.error('Connection error:', err.message)
     }
