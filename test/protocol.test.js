@@ -1,5 +1,6 @@
-const { describe, it, beforeEach } = require('node:test')
+const { describe, it } = require('node:test')
 const assert = require('node:assert')
+const os = require('node:os')
 
 // Fresh require for each test file to get independent nextId counter
 const {
@@ -10,8 +11,17 @@ const {
   rpc,
   rpcResult,
   rpcError,
-  rpcNotify
+  rpcNotify,
+  MAX_HOST_MESSAGE_SIZE,
+  MAX_EXTENSION_MESSAGE_SIZE
 } = require('../src/protocol')
+
+function lengthHeader(length) {
+  const header = Buffer.alloc(4)
+  if (os.endianness() === 'LE') header.writeUInt32LE(length)
+  else header.writeUInt32BE(length)
+  return header
+}
 
 describe('encodeNative / decodeNative', () => {
   it('roundtrips a single message', () => {
@@ -59,6 +69,29 @@ describe('encodeNative / decodeNative', () => {
     const { messages, remainder } = decodeNative(Buffer.alloc(0))
     assert.strictEqual(messages.length, 0)
     assert.strictEqual(remainder.length, 0)
+  })
+
+  it('frames non-ASCII JSON using byte length and native endianness', () => {
+    const msg = { text: 'こんにちは 🌍' }
+    const frame = encodeNative(msg)
+    assert.deepStrictEqual(frame.subarray(0, 4), lengthHeader(Buffer.byteLength(JSON.stringify(msg))))
+    assert.deepStrictEqual(decodeNative(frame).messages, [msg])
+  })
+
+  it('rejects zero and oversized lengths immediately from the header', () => {
+    assert.throws(() => decodeNative(lengthHeader(0)), /Invalid native message length/)
+    assert.throws(() => decodeNative(lengthHeader(MAX_EXTENSION_MESSAGE_SIZE + 1)), /Invalid native message length/)
+    assert.throws(() => decodeNative(lengthHeader(MAX_HOST_MESSAGE_SIZE + 1), MAX_HOST_MESSAGE_SIZE), /Invalid native message length/)
+  })
+
+  it('accepts exactly the configured size and rejects larger encoded messages', () => {
+    assert.deepStrictEqual(decodeNative(encodeNative('x', 3), 3).messages, ['x'])
+    assert.throws(() => encodeNative('xx', 3), /exceeds 3 bytes/)
+  })
+
+  it('rejects malformed JSON and invalid UTF-8 instead of replacing bytes', () => {
+    assert.throws(() => decodeNative(Buffer.concat([lengthHeader(1), Buffer.from('!')])), SyntaxError)
+    assert.throws(() => decodeNative(Buffer.concat([lengthHeader(3), Buffer.from([0x22, 0xff, 0x22])])), /utf-8/i)
   })
 })
 
@@ -133,6 +166,64 @@ describe('createMessageReader', () => {
     assert.deepStrictEqual(collected[0], { x: 1 })
     assert.deepStrictEqual(collected[1], { x: 2 })
     assert.deepStrictEqual(collected[2], { x: 3 })
+  })
+
+  it('handles byte-by-byte fragmentation across headers and UTF-8 payloads', () => {
+    const collected = []
+    const reader = createMessageReader(msg => collected.push(msg))
+    const expected = [{ text: '🌍' }, { next: true }]
+    for (const byte of Buffer.concat(expected.map(msg => encodeNative(msg)))) reader(Buffer.from([byte]))
+    reader.end()
+    assert.deepStrictEqual(collected, expected)
+  })
+
+  it('limits each frame rather than the combined chunk size', () => {
+    const collected = []
+    const reader = createMessageReader(msg => collected.push(msg), { maxMessageSize: 3 })
+    reader(Buffer.concat([encodeNative('x'), encodeNative('y')]))
+    assert.deepStrictEqual(collected, ['x', 'y'])
+  })
+
+  it('reports an invalid frame once and stops reading that connection', () => {
+    const collected = []
+    const errors = []
+    const reader = createMessageReader(msg => collected.push(msg), { onError: err => errors.push(err) })
+    reader(Buffer.concat([encodeNative({ ok: true }), lengthHeader(0), encodeNative({ ignored: true })]))
+    reader(encodeNative({ ignored: true }))
+    reader.end()
+    assert.deepStrictEqual(collected, [{ ok: true }])
+    assert.strictEqual(errors.length, 1)
+    assert.match(errors[0].message, /Invalid native message length/)
+  })
+
+  it('rejects oversized headers before receiving their payloads', () => {
+    const errors = []
+    const reader = createMessageReader(() => assert.fail('Unexpected message'), {
+      maxMessageSize: 10,
+      onError: err => errors.push(err)
+    })
+    reader(lengthHeader(11))
+    assert.strictEqual(errors.length, 1)
+  })
+
+  it('reports malformed JSON through onError', () => {
+    const errors = []
+    const reader = createMessageReader(() => assert.fail('Unexpected message'), { onError: err => errors.push(err) })
+    reader(Buffer.concat([lengthHeader(1), Buffer.from('!')]))
+    assert.strictEqual(errors.length, 1)
+    assert.ok(errors[0] instanceof SyntaxError)
+  })
+
+  it('detects truncated headers and payloads at EOF', () => {
+    for (const frame of [Buffer.from([1]), encodeNative({ x: 1 }).subarray(0, -1)]) {
+      const errors = []
+      const reader = createMessageReader(() => assert.fail('Unexpected message'), { onError: err => errors.push(err) })
+      reader(frame)
+      reader.end()
+      reader.end()
+      assert.strictEqual(errors.length, 1)
+      assert.match(errors[0].message, /Truncated native message/)
+    }
   })
 })
 

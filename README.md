@@ -7,7 +7,7 @@
 
 ## What It Does
 
-Blade Bridge lets you control Chrome from your terminal. It connects a CLI to a Chrome extension through Chrome's Native Messaging protocol -- no network ports, no HTTP servers, no dependencies. The entire bridge is ~330 lines of JavaScript.
+Blade Bridge lets you control Chrome from your terminal. It connects a CLI to a Chrome extension through Chrome's Native Messaging protocol -- no network ports, no HTTP servers, no dependencies.
 
 ## Architecture
 
@@ -24,6 +24,8 @@ Blade Bridge lets you control Chrome from your terminal. It connects a CLI to a 
 ```
 
 Chrome spawns the Host process automatically when the extension connects via `connectNative`. The Host opens an IPC socket so the CLI can send commands at any time. Messages flow bidirectionally through the same channel.
+
+Multiple CLI clients can use the same host concurrently. The host assigns unique request IDs on the Chrome connection and returns each response only to its requesting client, restoring the original ID. Extension notifications are broadcast to connected clients.
 
 ## Quick Start
 
@@ -52,6 +54,8 @@ Chrome spawns the Host process automatically when the extension connects via `co
 ## Usage
 
 ### One-shot mode
+
+Commands exit with status `0` after a successful response and status `1` for RPC errors, protocol errors, or a host disconnect before the response. Output is flushed before the process exits, including when redirected to a file or another command.
 
 Pass the method (and optional JSON params) as arguments:
 
@@ -125,11 +129,15 @@ blade-bridge bookmarks.list
 
 The `blade.js` entry point serves as a **dual-mode binary**:
 
-- **Host mode** -- When Chrome spawns the process with a `chrome-extension://` argument, it starts the Native Messaging host. The host reads/writes Chrome's stdin/stdout using the native messaging protocol (4-byte little-endian length prefix + JSON payload) and opens an IPC socket (named pipe on Windows, Unix socket elsewhere) for CLI connections.
+- **Host mode** -- When Chrome spawns the process with a `chrome-extension://` argument, it starts the Native Messaging host. The host reads/writes Chrome's stdin/stdout using the native messaging protocol (4-byte native-endian length prefix + UTF-8 JSON payload) and opens an IPC socket (named pipe on Windows, Unix socket elsewhere) for CLI connections.
 
 - **CLI mode** -- When run from the terminal, it connects to the IPC socket and sends JSON-RPC 2.0 messages. In one-shot mode, it sends a single request and exits after receiving the response. In interactive mode, it opens a REPL.
 
 The extension's service worker connects to the host via `chrome.runtime.connectNative` and dispatches incoming RPC calls to the `handlers` map, returning results or errors over the same channel. It auto-reconnects with exponential backoff if the host disconnects.
+
+Frames are limited to 1 MiB toward Chrome and 64 MiB from the extension, following [Chrome's native messaging limits](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging). Invalid client frames disconnect that client; invalid or truncated Chrome frames shut down the host and close its clients. Results from commands still running on a disconnected extension port are discarded instead of being sent through a new connection.
+
+The host preserves a socket used by another running host and recovers stale Unix sockets after an abrupt exit. Unix sockets are restricted to the current user with mode `0600`.
 
 ## Platform Support
 

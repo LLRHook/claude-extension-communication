@@ -72,34 +72,57 @@ const handlers = {
   })
 }
 
-async function handleMessage(msg) {
-  const { id, method, params } = msg
-  if (id === undefined) return
+function postResponse(sourcePort, message) {
+  if (port !== sourcePort) return
+  try { sourcePort.postMessage(message) } catch (err) {
+    console.warn('Blade: could not send response', err.message)
+  }
+}
 
-  const handler = handlers[method]
+function validId(id) {
+  return id === null || typeof id === 'string' || (typeof id === 'number' && Number.isFinite(id))
+}
+
+async function handleMessage(msg, sourcePort) {
+  if (msg === null || typeof msg !== 'object' || Array.isArray(msg) ||
+      msg.jsonrpc !== '2.0' || typeof msg.method !== 'string' ||
+      ('id' in msg && !validId(msg.id)) ||
+      ('params' in msg && (msg.params === null || typeof msg.params !== 'object'))) {
+    const id = msg && typeof msg === 'object' && validId(msg.id) ? msg.id : null
+    postResponse(sourcePort, { jsonrpc: '2.0', id, error: { code: -32600, message: 'Invalid Request' } })
+    return
+  }
+
+  const { id, method, params } = msg
+  const respond = message => { if ('id' in msg) postResponse(sourcePort, message) }
+
+  const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined
   if (!handler) {
-    port?.postMessage({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found: ' + method } })
+    respond({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found: ' + method } })
     return
   }
 
   try {
     const result = await handler(params || {})
-    port?.postMessage({ jsonrpc: '2.0', id, result })
+    respond({ jsonrpc: '2.0', id, result: result === undefined ? null : result })
   } catch (err) {
-    port?.postMessage({ jsonrpc: '2.0', id, error: { code: -32000, message: err.message } })
+    respond({ jsonrpc: '2.0', id, error: { code: -32000, message: err?.message || String(err) } })
   }
 }
 
 function connect() {
-  port = chrome.runtime.connectNative(HOST_NAME)
+  const nativePort = chrome.runtime.connectNative(HOST_NAME)
+  port = nativePort
 
-  port.onMessage.addListener(msg => {
+  nativePort.onMessage.addListener(msg => {
+    if (port !== nativePort) return
     backoff = 1000
-    handleMessage(msg)
+    handleMessage(msg, nativePort)
   })
 
-  port.onDisconnect.addListener(() => {
+  nativePort.onDisconnect.addListener(() => {
     const error = chrome.runtime.lastError
+    if (port !== nativePort) return
     console.warn('Blade: disconnected', error?.message || '')
     port = null
     setTimeout(() => { connect(); backoff = Math.min(backoff * 2, 30000) }, backoff)
