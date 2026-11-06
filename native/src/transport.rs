@@ -2,8 +2,6 @@ use std::{io, path::Path};
 
 #[cfg(unix)]
 pub type Stream = tokio::net::UnixStream;
-#[cfg(windows)]
-pub use platform::Stream;
 
 #[cfg(unix)]
 mod platform {

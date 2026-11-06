@@ -588,8 +588,14 @@ describe('native host', () => {
     // Ensure all connections have been accepted before adding the 33rd.
     host.child.stdin.write(encodeNative({ jsonrpc: '2.0', method: 'ready' }))
     for (const peer of peers) await peer.incoming.next()
-    const excess = await host.connect()
-    await once(excess.client, 'close')
+    // Windows can report the host's capacity rejection during pipe connect,
+    // before a socket is returned. Other failures must still fail this case.
+    const excess = await host.connect().catch(error => {
+      assert.equal(process.platform, 'win32')
+      assert.equal(error.code, 'EPIPE')
+      return null
+    })
+    if (excess) await excess.closed
     peers[0].client.write(encodeNative({ jsonrpc: '2.0', id: 1, method: 'ping' }))
     assert.equal((await host.outgoing.next()).method, 'ping')
   })
