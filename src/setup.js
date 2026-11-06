@@ -5,6 +5,7 @@ const net = require('net')
 const readline = require('readline')
 const { execSync } = require('child_process')
 const { ipcSocketPath } = require('./protocol')
+const { hostBinaryPath } = require('./native')
 
 const HOST_NAME = 'com.blade.bridge'
 const PROJECT_ROOT = path.resolve(__dirname, '..')
@@ -31,6 +32,12 @@ function buildManifest(extensionId) {
 
 function install(extensionId) {
   if (!extensionId) { console.error('Usage: blade install <extension-id>'); process.exit(1) }
+
+  if (!fs.existsSync(hostBinaryPath())) {
+    console.error('Rust host not built. Run "npm run build:host" before installing the native manifest.')
+    process.exitCode = 1
+    return
+  }
 
   const manifest = buildManifest(extensionId)
   const dir = manifestDir()
@@ -126,6 +133,13 @@ function testConnection() {
 async function doctor() {
   console.log('\n--- Blade Bridge Doctor ---\n')
   let issues = 0
+
+  if (fs.existsSync(hostBinaryPath())) {
+    console.log('[OK] Rust host: ' + hostBinaryPath())
+  } else {
+    console.log('[FAIL] Rust host missing. Run "npm run build:host".')
+    issues++
+  }
 
   // Check 1: Manifest file
   const dir = manifestDir()

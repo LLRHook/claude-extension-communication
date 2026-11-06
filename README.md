@@ -1,13 +1,13 @@
 # Blade Bridge
 
-**Zero-dependency CLI-to-Chrome-extension bridge via Native Messaging.**
+**CLI-to-Chrome-extension bridge with a Rust Native Messaging host.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
 ## What It Does
 
-Blade Bridge lets you control Chrome from your terminal. It connects a CLI to a Chrome extension through Chrome's Native Messaging protocol -- no network ports, no HTTP servers, no dependencies.
+Blade Bridge lets you control Chrome from your terminal. It connects a Node.js CLI to a Chrome extension through a Rust host using Chrome's Native Messaging protocol. There are no network ports, HTTP servers, or npm runtime dependencies.
 
 ## Architecture
 
@@ -28,6 +28,12 @@ Chrome spawns the Host process automatically when the extension connects via `co
 Multiple CLI clients can use the same host concurrently. The host assigns unique request IDs on the Chrome connection and returns each response only to its requesting client, restoring the original ID. Extension notifications are broadcast to connected clients.
 
 ## Quick Start
+
+Node.js 18 or newer is required for the CLI and launcher. Packages include a Rust
+host for the platform/architecture used to build them. Installing from source or
+on another platform requires Rust 1.85 or newer and Cargo on `PATH`; installation
+builds the matching host locally from the locked dependencies. The host never
+downloads or compiles code at launch time.
 
 1. Install the CLI globally:
    ```sh
@@ -129,7 +135,7 @@ blade-bridge bookmarks.list
 
 The `blade.js` entry point serves as a **dual-mode binary**:
 
-- **Host mode** -- When Chrome spawns the process with a `chrome-extension://` argument, it starts the Native Messaging host. The host reads/writes Chrome's stdin/stdout using the native messaging protocol (4-byte native-endian length prefix + UTF-8 JSON payload) and opens an IPC socket (named pipe on Windows, Unix socket elsewhere) for CLI connections.
+- **Host mode** -- When Chrome spawns the process with a `chrome-extension://` argument, the Node launcher starts the packaged `native/bin/blade-host-<platform>-<arch>` binary (`.exe` on Windows), inheriting stdin/stdout directly. Rust owns native-endian framing, strict UTF-8/JSON validation, JSON-RPC routing, IPC connections and shutdown. One Rust process serves all clients; no subprocess is started per command.
 
 - **CLI mode** -- When run from the terminal, it connects to the IPC socket and sends JSON-RPC 2.0 messages. In one-shot mode, it sends a single request and exits after receiving the response. In interactive mode, it opens a REPL.
 
@@ -137,7 +143,39 @@ The extension's service worker connects to the host via `chrome.runtime.connectN
 
 Frames are limited to 1 MiB toward Chrome and 64 MiB from the extension, following [Chrome's native messaging limits](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging). Invalid client frames disconnect that client; invalid or truncated Chrome frames shut down the host and close its clients. Results from commands still running on a disconnected extension port are discarded instead of being sent through a new connection.
 
-The host preserves a socket used by another running host and recovers stale Unix sockets after an abrupt exit. Unix sockets are restricted to the current user with mode `0600`.
+The host preserves a socket used by another running host and recovers stale Unix sockets after an abrupt exit. Unix sockets are created with mode `0600`. Stale recovery requires an owned socket, a refused connection, and unchanged filesystem identity. An adjacent `.lock` file serializes host lifetimes and stale recovery; this file remains after exit and is never truncated or deleted. Regular files, symlinks, directories and sockets owned by another user are preserved. Shutdown removes only the socket the host created. Windows uses a local named pipe and refuses a second host instance.
+
+Output is bounded by message count and bytes. A stalled client is disconnected
+without blocking other clients. A failed or stalled Chrome output shuts down the
+host. Writes have a 10-second deadline. The host permits at most 32 clients and
+1,024 pending requests per client and a shared 16 MiB budget for saved request IDs;
+overload disconnects the sending client. It
+does not impose a command execution timeout, so methods such as `tabs.waitForLoad`
+retain their extension-side timeout behavior. Notifications never allocate a
+pending request or receive an RPC result.
+
+## Development and Packaging
+
+```sh
+npm run build:host
+npm test
+npm run test:rust
+cargo fmt --manifest-path native/Cargo.toml --check
+cargo clippy --locked --manifest-path native/Cargo.toml --all-targets -- -D warnings
+npm pack
+```
+
+`build:host` compiles the locked Rust host and copies it to `native/bin/` for the
+current platform/architecture. It honors `CARGO_TARGET_DIR`. `npm pack` runs this
+build and includes the binary, Rust sources, Cargo lockfile and local build
+scripts. `postinstall` builds only when the matching binary is absent. After
+editing Rust, rebuild before running the Node integration tests. `install` refuses
+to write a native manifest if the binary is missing; `doctor` reports that case.
+
+Tests use synthetic extension frames, temporary sockets, and an isolated
+temporary HOME for manifest installation. They never launch a browser or register
+a Windows native host. The JavaScript extension, CLI, setup commands and protocol
+helpers remain in JavaScript; the host core runs exclusively in Rust.
 
 ## Platform Support
 

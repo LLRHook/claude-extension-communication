@@ -1,14 +1,17 @@
 {
   "name": "blade-bridge",
   "version": "1.0.0",
-  "description": "Zero-dependency CLI-to-Chrome-extension bridge via Native Messaging",
+  "description": "CLI-to-Chrome-extension bridge with a Rust Native Messaging host",
   "main": "blade.js",
   "bin": {
     "blade-bridge": "./blade.js"
   },
   "scripts": {
+    "build:host": "node scripts/build-host.js",
+    "prepack": "npm run build:host",
     "test": "node --test",
-    "postinstall": "echo 'Run: blade-bridge install <extension-id> to complete setup'"
+    "test:rust": "cargo test --locked --manifest-path native/Cargo.toml",
+    "postinstall": "node scripts/ensure-host.js"
   },
   "keywords": [
     "chrome",
@@ -36,6 +39,11 @@
   "files": [
     "blade.js",
     "src/",
+    "scripts/",
+    "native/Cargo.toml",
+    "native/Cargo.lock",
+    "native/src/",
+    "native/bin/",
     "extension/"
   ]
 }
