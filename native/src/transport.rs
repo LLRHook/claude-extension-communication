@@ -306,12 +306,20 @@ mod platform {
                 .await
                 .unwrap()
             {
-                assert!(matches!(
-                    error.kind(),
-                    io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::NotConnected
-                ));
+                // DisconnectNamedPipe can return ERROR_PIPE_NOT_CONNECTED to
+                // the client. Rust does not consistently map Win32 233 to
+                // ErrorKind::NotConnected, so recognize that exact code too.
+                const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+                assert!(
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::NotConnected
+                    ) || error.raw_os_error() == Some(ERROR_PIPE_NOT_CONNECTED),
+                    "unexpected pipe-disconnect error: {error:?}; received {} of {size} bytes",
+                    received.len()
+                );
             }
             assert!(
                 received.len() < size,
