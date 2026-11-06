@@ -146,8 +146,14 @@ Frames are limited to 1 MiB toward Chrome and 64 MiB from the extension, followi
 The host preserves a socket used by another running host and recovers stale Unix sockets after an abrupt exit. Unix sockets are created with mode `0600`. Stale recovery requires an owned socket, a refused connection, and unchanged filesystem identity. An adjacent `.lock` file serializes host lifetimes and stale recovery; this file remains after exit and is never truncated or deleted. Regular files, symlinks, directories and sockets owned by another user are preserved. Shutdown removes only the socket the host created. Windows uses a local named pipe and refuses a second host instance.
 
 Output is bounded by message count and bytes. A stalled client is disconnected
-without blocking other clients. A failed or stalled Chrome output shuts down the
-host. Writes have a 10-second deadline. The host permits at most 32 clients and
+without blocking other clients. On Windows, IPC writes use at most 64 KiB per
+transport operation and retain the queued frame's byte budget until the last
+pending write completes. Aborting a client disconnects its named pipe, cancelling
+pending output. A failed or stalled Chrome output shuts down the host. Writes
+have a 10-second deadline. Clean native-input EOF and termination signals stop
+new input and drain already accepted output within one shared write deadline;
+malformed input and output errors abort immediately. An unread client can lose
+its remaining output when that shutdown deadline expires. The host permits at most 32 clients and
 1,024 pending requests per client and a shared 16 MiB budget for saved request IDs;
 overload disconnects the sending client. It
 does not impose a command execution timeout, so methods such as `tabs.waitForLoad`
@@ -171,6 +177,13 @@ build and includes the binary, Rust sources, Cargo lockfile and local build
 scripts. `postinstall` builds only when the matching binary is absent. After
 editing Rust, rebuild before running the Node integration tests. `install` refuses
 to write a native manifest if the binary is missing; `doctor` reports that case.
+
+The PR CI checks the exact head on Node 18/20/22 across Linux, Windows and macOS,
+including the real Rust host and Node launcher. Backpressure tests keep peers
+unread, exercise independent clients and late responses, and bound teardown.
+Windows Rust tests also check overlapped-write completion, cancellation, chunk
+size and graceful delivery of the final bytes. Platform-specific Unix filesystem
+and signal tests retain their Windows skips.
 
 Tests use synthetic extension frames, temporary sockets, and an isolated
 temporary HOME for manifest installation. They never launch a browser or register

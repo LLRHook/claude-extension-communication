@@ -39,6 +39,15 @@ function messages(stream) {
   }
 }
 
+async function bounded(promise, ms, label) {
+  let timer
+  try {
+    return await Promise.race([promise, new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(label)), ms)
+    })])
+  } finally { clearTimeout(timer) }
+}
+
 async function bridge(t, { socket, launcher = false, writeTimeoutMs = 10000, readOutput = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blade-host-'))
   const sockPath = socket || (process.platform === 'win32'
@@ -48,17 +57,27 @@ async function bridge(t, { socket, launcher = false, writeTimeoutMs = 10000, rea
   // case enters through blade.js, overriding only the synthetic socket location.
   const script = `
     const socket = process.argv[1]
-    require('./src/protocol').ipcSocketPath = () => socket
+    const writeTimeoutMs = Number(process.argv[2])
+    const host = require('./src/host')
+    const startHost = host.startHost
+    host.startHost = () => {
+      const native = startHost({ socketPath: socket, writeTimeoutMs })
+      // The fixture can force only the child it started, through its owner.
+      process.on('message', message => { if (message === 'stop-host') native.kill('SIGKILL') })
+      native.once('exit', () => { if (process.connected) process.disconnect() })
+      return native
+    }
     process.argv = [process.argv[0], 'blade.js', 'chrome-extension://synthetic/']
     require('./blade')
   `
   const child = spawn(launcher ? process.execPath : hostBinaryPath(), launcher
-    ? ['-e', script, sockPath]
+    ? ['-e', script, sockPath, String(writeTimeoutMs)]
     : ['--socket', sockPath, '--write-timeout-ms', String(writeTimeoutMs)], {
     cwd: path.resolve(__dirname, '..'),
-    stdio: ['pipe', 'pipe', 'pipe']
+    stdio: launcher ? ['pipe', 'pipe', 'pipe', 'ipc'] : ['pipe', 'pipe', 'pipe']
   })
   const closed = once(child, 'close')
+  const exited = once(child, 'exit')
   const outgoing = readOutput ? messages(child.stdout) : null
   const clients = new Set()
   let stderr = ''
@@ -66,22 +85,32 @@ async function bridge(t, { socket, launcher = false, writeTimeoutMs = 10000, rea
   child.stdin.on('error', () => {})
   t.after(async () => {
     for (const client of clients) client.destroy()
-    child.stdin.destroy()
-    child.kill()
-    await closed
-    fs.rmSync(dir, { recursive: true, force: true })
+    child.stdin.end()
+    child.stdout.resume()
+    try {
+      await bounded(closed, 1000, 'Host did not stop at EOF')
+    } catch {
+      if (launcher && child.connected) child.send('stop-host', () => {})
+      else child.kill('SIGKILL')
+      await bounded(closed, 1000, 'Owned host did not stop after forced teardown')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
-  async function connect() {
+  async function connect({ read = true } = {}) {
     const deadline = Date.now() + 2000
     while (true) {
       if (child.exitCode !== null) throw new Error('Host exited: ' + stderr)
       const client = net.createConnection(sockPath)
-      const incoming = messages(client)
+      const incoming = read ? messages(client) : null
+      const closed = new Promise(resolve => client.once('close', resolve))
+      client.on('error', () => {})
+      if (!read) client.pause()
       try {
         await once(client, 'connect')
         clients.add(client)
-        return { client, incoming }
+        return { client, incoming, closed }
       } catch (err) {
         client.destroy()
         if (!['ENOENT', 'ECONNREFUSED'].includes(err.code) || Date.now() >= deadline) throw err
@@ -90,7 +119,7 @@ async function bridge(t, { socket, launcher = false, writeTimeoutMs = 10000, rea
     }
   }
 
-  return { child, closed, outgoing, connect, sockPath, stderr: () => stderr }
+  return { child, closed, exited, outgoing, connect, sockPath, stderr: () => stderr }
 }
 
 describe('native host', () => {
@@ -108,7 +137,7 @@ describe('native host', () => {
   it('forwards launcher SIGTERM to Rust and closes the socket', { timeout: 5000, skip: process.platform === 'win32' }, async t => {
     const host = await bridge(t, { launcher: true })
     const { client } = await host.connect()
-    const closed = once(client, 'close')
+    const closed = new Promise(resolve => client.once('close', resolve))
     host.child.kill('SIGTERM')
     await closed
     assert.equal((await host.closed)[0], 0, host.stderr())
@@ -138,7 +167,7 @@ describe('native host', () => {
     a.client.write(encodeNative({ jsonrpc: '2.0', id: 'old', method: 'tabs.list' }))
     const request = await host.outgoing.next()
     a.client.destroy()
-    await once(a.client, 'close')
+    await a.closed
     const b = await host.connect()
     host.child.stdin.write(encodeNative({ jsonrpc: '2.0', id: request.id, result: 'private' }))
     host.child.stdin.write(encodeNative({ jsonrpc: '2.0', method: 'ready', params: {} }))
@@ -148,7 +177,7 @@ describe('native host', () => {
   it('disconnects malformed clients without killing the native host', { timeout: 5000 }, async t => {
     const host = await bridge(t)
     const bad = await host.connect()
-    const closed = once(bad.client, 'close')
+    const closed = bad.closed
     const invalid = encodeNative({})
     invalid[4] = 0x21
     bad.client.write(invalid)
@@ -165,7 +194,7 @@ describe('native host', () => {
   it('closes connected clients and exits when Chrome closes stdin', { timeout: 5000 }, async t => {
     const host = await bridge(t)
     const { client } = await host.connect()
-    const clientClosed = once(client, 'close')
+    const clientClosed = new Promise(resolve => client.once('close', resolve))
     host.child.stdin.end()
     await clientClosed
     const [code] = await host.closed
@@ -215,7 +244,7 @@ describe('native host', () => {
     const frame = encodeNative('')
     if (os.endianness() === 'LE') frame.writeUInt32LE(MAX_HOST_MESSAGE_SIZE + 1)
     else frame.writeUInt32BE(MAX_HOST_MESSAGE_SIZE + 1)
-    const closed = once(client, 'close')
+    const closed = new Promise(resolve => client.once('close', resolve))
     client.write(frame.subarray(0, 4))
     await closed
     const good = await host.connect()
@@ -239,7 +268,7 @@ describe('native host', () => {
     const frame = encodeNative('')
     if (os.endianness() === 'LE') frame.writeUInt32LE(MAX_EXTENSION_MESSAGE_SIZE + 1)
     else frame.writeUInt32BE(MAX_EXTENSION_MESSAGE_SIZE + 1)
-    const closed = once(client, 'close')
+    const closed = new Promise(resolve => client.once('close', resolve))
     host.child.stdin.write(frame.subarray(0, 4))
     await closed
     assert.equal((await host.closed)[0], 1)
@@ -258,7 +287,7 @@ describe('native host', () => {
   it('shuts down for malformed native response envelopes', { timeout: 5000 }, async t => {
     const host = await bridge(t)
     const { client } = await host.connect()
-    const closed = once(client, 'close')
+    const closed = new Promise(resolve => client.once('close', resolve))
     host.child.stdin.write(encodeNative({ jsonrpc: '2.0', id: 1 }))
     await closed
     assert.equal((await host.closed)[0], 1)
@@ -366,7 +395,7 @@ describe('native host', () => {
     const invalidUtf8 = Buffer.concat([encodeNative('x').subarray(0, 4), Buffer.from([0x22, 0xff, 0x22])])
     for (const frame of [Buffer.from([1]), encodeNative({ jsonrpc: '2.0' }).subarray(0, -1), invalidUtf8]) {
       const bad = await host.connect()
-      const closed = once(bad.client, 'close')
+      const closed = bad.closed
       bad.client.end(frame)
       await closed
     }
@@ -382,32 +411,83 @@ describe('native host', () => {
     for (const peer of peers) assert.equal((await peer.incoming.next()).method, 'ready')
   })
 
-  it('survives a slow client without delaying another client', { timeout: 5000 }, async t => {
-    const host = await bridge(t, { writeTimeoutMs: 100 })
-    const slow = await host.connect()
-    slow.client.removeAllListeners('data')
-    slow.client.pause()
-    slow.client.write(encodeNative({ jsonrpc: '2.0', id: 1, method: 'large' }))
-    const first = await host.outgoing.next()
-    host.child.stdin.write(encodeNative({ jsonrpc: '2.0', id: first.id, result: 'x'.repeat(2 * MAX_HOST_MESSAGE_SIZE) }))
-    await new Promise(resolve => setTimeout(resolve, 200))
-    const good = await host.connect()
-    good.client.write(encodeNative({ jsonrpc: '2.0', id: 2, method: 'ping' }))
-    const second = await host.outgoing.next()
-    host.child.stdin.write(encodeNative({ jsonrpc: '2.0', id: second.id, result: 'alive' }))
-    assert.equal((await good.incoming.next()).result, 'alive')
-    const closed = once(slow.client, 'close')
-    slow.client.resume()
-    await closed
-    assert.equal(host.child.exitCode, null)
+  it('drains an accepted response at clean native EOF before closing clients', { timeout: 5000 }, async t => {
+    const host = await bridge(t, { writeTimeoutMs: 1000 })
+    const peer = await host.connect({ read: false })
+    peer.client.write(encodeNative({ jsonrpc: '2.0', id: 'last', method: 'large' }))
+    const request = await host.outgoing.next()
+    const result = 'x'.repeat(2 * MAX_HOST_MESSAGE_SIZE)
+    host.child.stdin.end(encodeNative({ jsonrpc: '2.0', id: request.id, result }))
+    // Keep the real pipe full while EOF is processed, then let it drain.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const incoming = messages(peer.client)
+    peer.client.resume()
+    assert.deepEqual(await incoming.next(), { jsonrpc: '2.0', id: 'last', result })
+    assert.equal((await host.closed)[0], 0, host.stderr())
   })
 
-  it('fails with a bounded timeout when Chrome stops reading stdout', { timeout: 5000 }, async t => {
-    const host = await bridge(t, { writeTimeoutMs: 100, readOutput: false })
-    const { client } = await host.connect()
-    client.write(encodeNative({ jsonrpc: '2.0', id: 1, method: 'large', params: { data: 'x'.repeat(512 * 1024) } }))
-    assert.equal((await host.closed)[0], 1)
-    assert.match(host.stderr(), /Write timed out/)
+  for (const launcher of [false, true]) {
+    it(`survives a slow client without delaying another client (launcher=${launcher})`, { timeout: 5000 }, async t => {
+      const host = await bridge(t, { launcher, writeTimeoutMs: 100 })
+      const slow = await host.connect({ read: false })
+      slow.client.write(Buffer.concat([
+        encodeNative({ jsonrpc: '2.0', id: 1, method: 'large' }),
+        encodeNative({ jsonrpc: '2.0', id: 2, method: 'pending' })
+      ]))
+      const first = await host.outgoing.next()
+      const pending = await host.outgoing.next()
+      host.child.stdin.write(encodeNative({ jsonrpc: '2.0', id: first.id, result: 'x'.repeat(2 * MAX_HOST_MESSAGE_SIZE) }))
+      const good = await host.connect()
+      good.client.write(encodeNative({ jsonrpc: '2.0', id: 2, method: 'ping' }))
+      const second = await host.outgoing.next()
+      host.child.stdin.write(encodeNative({ jsonrpc: '2.0', id: second.id, result: 'alive' }))
+      assert.deepEqual(await good.incoming.next(), { jsonrpc: '2.0', id: 2, result: 'alive' })
+      // Remain unread beyond the write deadline, even after the other response.
+      await new Promise(resolve => setTimeout(resolve, 200))
+      slow.client.resume()
+      await bounded(slow.closed, 1000, 'Stalled IPC peer remained connected')
+      host.child.stdin.write(Buffer.concat([
+        encodeNative({ jsonrpc: '2.0', id: pending.id, result: 'private late response' }),
+        encodeNative({ jsonrpc: '2.0', method: 'ready' })
+      ]))
+      assert.equal((await good.incoming.next()).method, 'ready')
+      assert.equal(good.incoming.queue.length, 0)
+      assert.equal(host.child.exitCode, null)
+    })
+
+    it(`fails with a bounded timeout when Chrome stops reading stdout (launcher=${launcher})`, { timeout: 5000 }, async t => {
+      const host = await bridge(t, { launcher, writeTimeoutMs: 100, readOutput: false })
+      const { client } = await host.connect()
+      // Fill the real transport with bounded, legal frames. A single write can
+      // fit in an OS/libuv buffer and is not proof of backpressure on Windows.
+      const frame = encodeNative({ jsonrpc: '2.0', method: 'large', params: { data: 'x'.repeat(512 * 1024) } })
+      for (let i = 0; i < 32 && host.child.exitCode === null && !client.destroyed; i++) {
+        await new Promise(resolve => client.write(frame, resolve))
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      // Observe process termination while stdout is still unread. Then drain the
+      // parent's pipe so Node can emit close and reap every owned handle.
+      assert.equal((await bounded(host.exited, 2000, 'Host did not exit with stalled stdout'))[0], 1)
+      host.child.stdout.resume()
+      assert.equal((await host.closed)[0], 1)
+      assert.match(host.stderr(), /Write timed out/)
+    })
+  }
+
+  it('bounds EOF teardown with an unread client and preserves another host', { timeout: 5000 }, async t => {
+    const independent = await bridge(t)
+    const other = await independent.connect()
+    const host = await bridge(t, { writeTimeoutMs: 100 })
+    const slow = await host.connect({ read: false })
+    slow.client.write(encodeNative({ jsonrpc: '2.0', id: 1, method: 'large' }))
+    const request = await host.outgoing.next()
+    host.child.stdin.end(encodeNative({ jsonrpc: '2.0', id: request.id, result: 'x'.repeat(2 * MAX_HOST_MESSAGE_SIZE) }))
+    assert.equal((await bounded(host.exited, 1000, 'EOF drain exceeded its deadline'))[0], 0)
+    slow.client.destroy()
+    await host.closed
+    other.client.write(encodeNative({ jsonrpc: '2.0', id: 1, method: 'ping' }))
+    assert.equal((await independent.outgoing.next()).method, 'ping')
+    assert.equal(independent.child.exitCode, null)
   })
 
   it('exits for a broken Chrome stdout pipe', { timeout: 5000 }, async t => {
@@ -449,7 +529,7 @@ describe('native host', () => {
   it('closes clients and removes its socket on SIGTERM', { timeout: 5000, skip: process.platform === 'win32' }, async t => {
     const host = await bridge(t)
     const { client } = await host.connect()
-    const closed = once(client, 'close')
+    const closed = new Promise(resolve => client.once('close', resolve))
     assert.equal(fs.statSync(host.sockPath).mode & 0o777, 0o600)
     host.child.kill('SIGTERM')
     await closed

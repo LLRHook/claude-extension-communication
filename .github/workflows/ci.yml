@@ -1,15 +1,23 @@
 name: CI
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         node-version: [18, 20, 22]
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: git rev-parse HEAD
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
@@ -18,11 +26,16 @@ jobs:
 
   rust:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: git rev-parse HEAD
       - run: cargo fmt --manifest-path native/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path native/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path native/Cargo.toml

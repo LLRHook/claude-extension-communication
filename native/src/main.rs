@@ -14,7 +14,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
-    time::timeout,
+    time::{timeout, timeout_at, Instant},
 };
 
 const MAX_CLIENTS: usize = 32;
@@ -34,7 +34,7 @@ struct Packet {
 }
 
 struct Outbox {
-    sender: mpsc::Sender<Packet>,
+    sender: Option<mpsc::Sender<Packet>>,
     local: Arc<Semaphore>,
     global: Arc<Semaphore>,
 }
@@ -53,6 +53,8 @@ impl Outbox {
             .try_acquire_many_owned(len)
             .map_err(|_| invalid("Global output byte budget exceeded"))?;
         self.sender
+            .as_ref()
+            .ok_or_else(|| invalid("Output is closing"))?
             .try_send(Packet {
                 bytes,
                 _local: local,
@@ -69,10 +71,10 @@ fn writer<W: AsyncWrite + Unpin + Send + 'static>(
     global: Arc<Semaphore>,
     budget: usize,
     deadline: Duration,
-) -> (Outbox, JoinHandle<()>) {
+) -> (Outbox, JoinHandle<io::Result<()>>) {
     let (sender, mut receiver) = mpsc::channel::<Packet>(8);
     let outbox = Outbox {
-        sender,
+        sender: Some(sender),
         local: Arc::new(Semaphore::new(budget)),
         global,
     };
@@ -88,10 +90,21 @@ fn writer<W: AsyncWrite + Unpin + Send + 'static>(
                 Err(io::Error::new(io::ErrorKind::TimedOut, "Write timed out"))
             });
             if let Err(error) = result {
-                let _ = events.send(Event::WriteError(id, error)).await;
-                return;
+                // Preserve the error for shutdown even if the event receiver has
+                // already closed. Normal routing still learns about it promptly.
+                let reported = io::Error::new(error.kind(), error.to_string());
+                let _ = events.send(Event::WriteError(id, reported)).await;
+                return Err(error);
             }
         }
+        timeout(deadline, output.shutdown())
+            .await
+            .unwrap_or_else(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Write timed out during shutdown",
+                ))
+            })
     });
     (outbox, task)
 }
@@ -121,15 +134,15 @@ fn reader<R: AsyncRead + Unpin + Send + 'static>(
 
 struct Client {
     output: Outbox,
-    tasks: [JoinHandle<()>; 2],
+    reader: JoinHandle<()>,
+    writer: JoinHandle<io::Result<()>>,
     requests: HashSet<u64>,
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
+        self.reader.abort();
+        self.writer.abort();
     }
 }
 
@@ -262,7 +275,7 @@ async fn run(socket: PathBuf, deadline: Duration) -> io::Result<()> {
     let mut listener = transport::Listener::bind(&socket).await?;
     let (events, mut incoming) = mpsc::channel(4);
     let global = Arc::new(Semaphore::new(128 * MAX_HOST));
-    let (chrome, chrome_writer) = writer(
+    let (chrome, mut chrome_writer) = writer(
         tokio::io::stdout(),
         0,
         events.clone(),
@@ -294,7 +307,7 @@ async fn run(socket: PathBuf, deadline: Duration) -> io::Result<()> {
                 let (input, output) = tokio::io::split(stream);
                 let (output, writer) = writer(output, id, events.clone(), global.clone(), MAX_EXTENSION + 4, deadline);
                 let reader = reader(input, id, MAX_HOST, events.clone());
-                router.clients.insert(id, Client { output, tasks: [reader, writer], requests: HashSet::new() });
+                router.clients.insert(id, Client { output, reader, writer, requests: HashSet::new() });
             }
             event = incoming.recv() => match event {
                 Some(Event::Message(0, message)) => {
@@ -316,10 +329,37 @@ async fn run(socket: PathBuf, deadline: Duration) -> io::Result<()> {
             }
         }
     };
-    router.clients.clear();
-    chrome_reader.abort();
-    chrome_writer.abort();
     drop(listener);
+    chrome_reader.abort();
+    // Stop new input before draining already accepted output. Closing the event
+    // receiver also prevents failed writers from waiting on an unconsumed event.
+    incoming.close();
+    for client in router.clients.values_mut() {
+        client.reader.abort();
+        client.output.sender.take();
+    }
+    router.chrome.sender.take();
+    let result = if result.is_ok() {
+        let end = Instant::now() + deadline;
+        let chrome_result = match timeout_at(end, &mut chrome_writer).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(io::Error::other(error)),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Write timed out during shutdown",
+            )),
+        };
+        // Writers already run concurrently. A single shared deadline bounds the
+        // entire drain, rather than extending shutdown for each packet/client.
+        for client in router.clients.values_mut() {
+            let _ = timeout_at(end, &mut client.writer).await;
+        }
+        chrome_result
+    } else {
+        result
+    };
+    router.clients.clear();
+    chrome_writer.abort();
     result
 }
 
@@ -380,7 +420,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel(8);
         (
             Outbox {
-                sender,
+                sender: Some(sender),
                 local: Arc::new(Semaphore::new(local)),
                 global,
             },
@@ -552,7 +592,10 @@ mod tests {
             Event::WriteError(9, error) => assert_eq!(error.kind(), io::ErrorKind::TimedOut),
             _ => panic!("expected writer timeout"),
         }
-        task.await.unwrap();
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
         assert_eq!(global.available_permits(), 64);
     }
 
@@ -574,7 +617,58 @@ mod tests {
             receiver.recv().await,
             Some(Event::WriteError(7, _))
         ));
-        task.await.unwrap();
+        assert!(task.await.unwrap().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn draining_writer_preserves_order_and_releases_all_permits() {
+        use tokio::io::AsyncReadExt;
+        let (output, mut peer) = tokio::io::duplex(1);
+        let (events, _) = mpsc::channel(4);
+        let global = Arc::new(Semaphore::new(64));
+        let (output, task) = writer(
+            output,
+            7,
+            events,
+            global.clone(),
+            64,
+            Duration::from_secs(1),
+        );
+        output.send(Arc::new(vec![1; 16])).unwrap();
+        output.send(Arc::new(vec![2; 16])).unwrap();
+        drop(output);
+        let mut bytes = Vec::new();
+        timeout(Duration::from_secs(1), peer.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, [vec![1; 16], vec![2; 16]].concat());
+        task.await.unwrap().unwrap();
+        assert_eq!(global.available_permits(), 64);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_stalled_writer_refunds_inflight_and_queued_packets() {
+        let (output, _unread_peer) = tokio::io::duplex(1);
+        let (events, _) = mpsc::channel(4);
+        let global = Arc::new(Semaphore::new(64));
+        let (output, task) = writer(
+            output,
+            7,
+            events,
+            global.clone(),
+            64,
+            Duration::from_secs(1),
+        );
+        output.send(Arc::new(vec![1; 16])).unwrap();
+        output.send(Arc::new(vec![2; 16])).unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(global.available_permits(), 32);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(global.available_permits(), 64);
+        assert!(output.send(Arc::new(vec![3; 16])).is_err());
+        assert_eq!(global.available_permits(), 64);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -594,10 +688,8 @@ mod tests {
             1,
             Client {
                 output,
-                tasks: [
-                    tokio::spawn(std::future::pending()),
-                    tokio::spawn(std::future::pending()),
-                ],
+                reader: tokio::spawn(std::future::pending()),
+                writer: tokio::spawn(std::future::pending()),
                 requests: HashSet::new(),
             },
         );
