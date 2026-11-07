@@ -1,0 +1,23 @@
+[package]
+name = "blade-host"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+serde_json = { version = "=1.0.154", features = ["raw_value"] }
+tokio = { version = "=1.54.1", features = ["rt", "net", "io-util", "io-std", "sync", "time", "signal", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
